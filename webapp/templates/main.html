@@ -1,0 +1,48 @@
+<!doctype html>
+<title>Autovar - Automatically extract variants</title>
+
+<div>
+  <h1>Query Variant</h1>
+  <form action="/" method="post">
+    <input type="text" name="variant" id="variant" value="{{ query }}"></input>
+    <input type="submit">
+  </form>
+</div>
+
+{% if error %}
+<div>{{ error }}</div>
+{% endif %}
+
+{% if predictions %}
+<div>
+  <h1>Result</h1>
+  <div>
+    {% for name, preds in predictions.items() %}
+    <div class="group">
+      <a href="{{ urls[name] }}">{{ name }}</a> - {{ urls[name] }}
+      {% if name == "GNOMAD" %}
+      <div>
+      {% for pred in preds %}
+        <span>
+          {{ pred.score_name }} {{ pred.score_value }}
+        </span>
+      {% endfor %}
+      </div>
+      {% else %}
+      {% for pred in preds %}
+        <div>
+          {{ pred.score_name }} {{ pred.score_value }} {{ pred.score_label}}
+        </div>
+      {% endfor %}
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<style>
+.group {
+  margin-top: 1em;
+}
+</style>

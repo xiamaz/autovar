@@ -1,0 +1,6 @@
+pandas==2.0.2
+pydantic==1.10.9
+Requests==2.31.0
+lxml
+gunicorn
+flask
