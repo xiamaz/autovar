@@ -1,0 +1,13 @@
+services:
+  autovar:
+    image: xiamaz/autovar
+    build:
+      context: .
+      args:
+        - HTTPS_PROXY
+    environment:
+      - HTTPS_PROXY=${HTTPS_PROXY}
+      - HTTP_PROXY=${HTTP_PROXY}
+    restart: always
+    ports:
+      - "5001:5001"
