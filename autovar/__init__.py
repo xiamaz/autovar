@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Tuple
+from typing import Any, Callable, List, Optional, Dict, Tuple
 import requests
 
 from pydantic import BaseModel
@@ -16,6 +16,10 @@ class GenomicVariant(BaseModel):
     ref: str
     alt: str
 
+    def __str__(self):
+        return f"chr{self.chr}:g.{self.position}{self.ref}>{self.alt}"
+
+
 class Prediction(BaseModel):
 
     variant: GenomicVariant
@@ -31,12 +35,31 @@ HEADERS = {
 }
 
 
+def get_spliceai_results(variant: GenomicVariant):
+    SPLICE_AI_URL = "https://spliceailookup-api.broadinstitute.org/spliceai/?hg=37&distance=500&mask=1&variant=19-11233940-G-A&raw=19-11233940%20-%20G-A"
+
+    if variant.assembly in ("GRCh37", "hg19"):
+        assemblyint = 37
+    elif variant.assembly in ("GRCh38", "hg38"):
+        assemblyint = 38
+    else:
+        raise RuntimeError(f"Unsupported assembly string {variant.assembly}")
+
+    params = {
+        "hg": assemblyint,
+        "distance": 500,
+        "mask": 1,
+    }
+
+
 class Scraper:
 
     @classmethod
     @property
     def name(cls):
         return cls.__name__
+
+
 
 
 class CADD(Scraper):
@@ -175,7 +198,6 @@ class GNOMAD(Scraper):
         resp_data = response.json()
         predictions = []
         if variant_data := resp_data["data"]["variant"]:
-            print(variant_data)
             exome_data = variant_data["exome"] or {"an": 0, "ac": 0, "ac_hom": 0, "ac_hemi": 0, "populations": []}
             genome_data = variant_data["genome"] or {"an": 0, "ac": 0, "ac_hom": 0, "ac_hemi": 0, "populations": []}
 
@@ -282,8 +304,102 @@ class Franklin(Scraper):
         return []
 
 
+def default_converter(results: dict):
+    return ", ".join(str(r) for r in results)
+
+
+def convert_list(results):
+    if results:
+        if type(results[0]) in (float, int):
+            return results[0]
+        elif len(results[0]) == 0:
+            return ""
+        maximum = max(results[0])
+        return maximum
+    return ""
+
+def fmt_hgvs(results):
+    if results:
+        annotations = results[0]
+        all_lines = []
+        if type(annotations) is dict:
+            annotations = [annotations]
+
+        for annot in annotations:
+            print(annot)
+            line = f"{annot['genename']}({annot['feature_id']}):{annot['hgvs_c']}"
+            if "hgvs_p" in annot:
+                line += f" {annot['hgvs_p']}"
+            line += f" ({annot['effect']})"
+            all_lines.append(line)
+        return "|".join(all_lines)
+    return ""
+
+
+class Mapping(BaseModel):
+    name: str
+    keys: List[tuple]
+    converter: Callable = default_converter
+
+
+def fetch_mapped(entry, mapping):
+    values = []
+    for keys in mapping.keys:
+        value = entry
+        for key in keys:
+            value = value.get(key, "")
+            if not value:
+                break
+        values.append(value)
+    fmt_value = mapping.converter(values)
+    return fmt_value
+
+
+
+class MyVariant(Scraper):
+    BASE_URL = "https://myvariant.info/v1/variant"
+    BASE_PARAMS = {
+        "email": "max.zhao@charite.de",
+        "size": 3,
+    }
+
+    MAPPINGS = [
+        Mapping(name="CADD_PHRED", keys=[("cadd", "phred")]),
+        Mapping(name="REVEL", keys=[("dbnsfp", "revel", "score")], converter=convert_list),
+        Mapping(name="Polyphen2", keys=[("dbnsfp", "polyphen2", "hdiv", "rankscore")]),
+        Mapping(name="Effect", keys=[("snpeff", "ann"),], converter=fmt_hgvs)
+    ]
+
+    @classmethod
+    def url(cls, variant: GenomicVariant) -> str:
+        return f"{cls.BASE_URL}/{str(variant)}"
+
+    @classmethod
+    def query(cls, variant: GenomicVariant):
+        params = {**cls.BASE_PARAMS, **{
+        }}
+        variant_id = str(variant)
+        resp = requests.post(cls.BASE_URL, params=params, json={"ids": [variant_id]})
+        resp.raise_for_status()
+        annotation_data = resp.json()
+
+        if len(annotation_data) < 1 or annotation_data[0].get("notfound", False):
+            return []
+
+        annotation_entry = annotation_data[0]
+        predictions = []
+        for prediction_mapping in cls.MAPPINGS:
+            result = fetch_mapped(annotation_entry, prediction_mapping)
+            pred = Prediction(variant=variant, score_value=result, score_name=prediction_mapping.name, score_source=cls.name)
+            if result:
+                predictions.append(pred)
+
+        return predictions
+
+
+
 VARIANT_SOURCES = [
-    CADD, MutationTaster2021, Franklin, GNOMAD
+    CADD, MutationTaster2021, Franklin, GNOMAD, MyVariant
 ]
 
 NUM_PROCESSES = len(VARIANT_SOURCES)

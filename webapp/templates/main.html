@@ -16,6 +16,23 @@
 {% if predictions %}
 <div>
   <h1>Result</h1>
+
+  {% if effects %}
+  {% for effect in effects %}
+  {% autoescape false %}
+  <div>{{effect | replace("|", "<br/>")}}</div>
+  {% endautoescape %}
+  {% endfor %}
+  {% endif %}
+
+  <h2>For copy pasting</h2>
+
+  <ul>
+    {% for selected_pred in selected_predictions %}
+    <li>{{ selected_pred.name }}: {{ selected_pred.value }}</li>
+    {% endfor %}
+  </ul>
+
   <div>
     {% for name, preds in predictions.items() %}
     <div class="group">
@@ -31,7 +48,7 @@
       {% else %}
       {% for pred in preds %}
         <div>
-          {{ pred.score_name }} {{ pred.score_value }} {{ pred.score_label}}
+          {{ pred.score_name }} {{ pred.score_value }} {% if pred.score_label %} {{ pred.score_label}} {% endif %}
         </div>
       {% endfor %}
       {% endif %}
