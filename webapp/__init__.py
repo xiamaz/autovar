@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 def parse(variant_string: str) -> Optional[GenomicVariant]:
     variant_string = variant_string.replace(",", "")
-    if m := re.search(r"(\d+)[ :\-_)]+(\d+)[ \-_:]*([ATCGatcg])[ >\-_:]([ATCGatcg])", variant_string):
+    if m := re.search(r"([YyXx\d]+)[ :\-_)]+(\d+)[ \-_:]*([ATCGatcg])[ >\-_:]([ATCGatcg])", variant_string):
         chrom = m.group(1)
         pos = int(m.group(2))
         ref = m.group(3)
@@ -17,10 +17,12 @@ def parse(variant_string: str) -> Optional[GenomicVariant]:
     return None
 
 
-def first_entry(name="", source=""):
+def first_entry(name="", source="", show_label=False):
     def wraps(predictions):
         for pred in predictions:
             if (not name or pred.score_name == name) and (not source or pred.score_source == source):
+                if show_label:
+                    return pred.score_label
                 return pred.score_value
         return "NOT FOUND"
     return wraps
@@ -58,6 +60,7 @@ PRETTY_KEYS = {
     "SpliceAI": first_entry("splice_ai_genome"),
     "GNOMAD MAF": first_entry("MAF"),
     "GNOMAD HOM": first_entry("HOM"),
+    "Metadome": first_entry(source="Metadome", show_label=True),
 }
 
 def format_entry(name, mapper, predictions):

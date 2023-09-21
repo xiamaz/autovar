@@ -1,3 +1,4 @@
+import re
 from typing import Any, Callable, List, Optional, Dict, Tuple
 import requests
 
@@ -30,6 +31,19 @@ class Prediction(BaseModel):
     score_source: str
 
 
+def get_prediction(predictions: List[Prediction], name=None, label=None, source=None) -> List[Prediction]:
+    """Returns predictions for which all of the submitted criteria match. Otherwise return nothing.
+    """
+    matched = []
+    for prediction in predictions:
+        matched_name = name is None or prediction.score_name == name
+        matched_label = label is None or prediction.score_label == label
+        matched_source = source is None or prediction.score_source == source
+        if matched_name and matched_label and matched_source:
+            matched.append(prediction)
+    return matched
+
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 }
@@ -58,8 +72,6 @@ class Scraper:
     @property
     def name(cls):
         return cls.__name__
-
-
 
 
 class CADD(Scraper):
@@ -304,6 +316,92 @@ class Franklin(Scraper):
         return []
 
 
+class Metadome(Scraper):
+
+    @classmethod
+    def score_to_label(cls, score) -> str:
+        """Taken from: https://github.com/cmbi/metadome/blob/84b281bf621a492a8cb75c04293c8631dbd3fede/metadome/presentation/web/static/js/dashboard/visualization.js#L1277
+
+        """
+        if score:
+            if score <= 0.175:
+                return "highly intolerant"
+            elif score <= 0.525:
+                return "intolerant"
+            elif score <= 0.7:
+                return "slightly intolerant"
+            elif score <= 0.875:
+                return "neutral"
+            elif score <= 1.025:
+                return "slightly tolerant"
+            elif score <= 1.375:
+                return "tolerant"
+            elif score > 1.375:
+                return "highly tolerant"
+        return ""
+
+    @classmethod
+    def url(cls, variant: GenomicVariant) -> str:
+        return ""
+
+    @classmethod
+    def query(cls, variant: GenomicVariant):
+        effects = MyVariant.get_effect(variant)
+        if not effects:
+            return []
+
+        def match_nm(nm_a, nm_b):
+            nm_a_core, *_ = nm_a.split(".")
+            nm_b_core, *_ = nm_b.split(".")
+            return nm_a_core == nm_b_core
+
+        if type(effects) is dict:
+            effects= [effects]
+
+        preds = []
+        for effect in effects:
+            gene_name = effect.get("genename")
+            if effect and gene_name:
+                protein_data = effect.get("prot", {})
+                protein_pos = int(protein_data.get("protpos") or -1)
+                transcripts = Metadome.get_transcripts(gene_name)
+                for transcript in transcripts:
+                    if transcript.get("has_protein_data"):
+                        effect_enst = effect.get("feature_id")
+                        transcript_enst = transcript.get("gencode_id")
+                        transcript_nms = transcript.get("refseq_nm_numbers")
+                        if match_nm(effect_enst, transcript_enst):
+                            metadome_data = Metadome.get_transcript_predictions(transcript_enst)
+                            metadome_effect = metadome_data["positional_annotation"][protein_pos]
+                            metadome_effect["domains"]
+                            score = metadome_effect["sw_dn_ds"]
+                            label = cls.score_to_label(score)
+                            pred = Prediction(variant=variant, score_name=f"{transcript_enst}({transcript_nms})", score_label=label, score_value=f"{score:.3f}", score_source=cls.name)
+                            preds.append(pred)
+        return preds
+
+    @classmethod
+    def get_transcripts(cls, gene_name: str) -> list:
+        url = f"https://stuart.radboudumc.nl/metadome/api/get_transcripts/{gene_name}"
+        resp = requests.get(url)
+        resp.raise_for_status()
+        data = resp.json()
+        print(data)
+
+        d = data.get("transcript_ids")
+        if not d:
+            return data.get("trancript_ids", [])
+        return d
+
+    @classmethod
+    def get_transcript_predictions(cls, enst_id: str) -> dict:
+        url = f"https://stuart.radboudumc.nl/metadome/api/result/{enst_id}/"
+        resp = requests.get(url)
+        resp.raise_for_status()
+        data = resp.json()
+        return data
+
+
 def default_converter(results: dict):
     return ", ".join(str(r) for r in results)
 
@@ -326,7 +424,6 @@ def fmt_hgvs(results):
             annotations = [annotations]
 
         for annot in annotations:
-            print(annot)
             line = f"{annot['genename']}({annot['feature_id']}):{annot['hgvs_c']}"
             if "hgvs_p" in annot:
                 line += f" {annot['hgvs_p']}"
@@ -375,6 +472,23 @@ class MyVariant(Scraper):
         return f"{cls.BASE_URL}/{str(variant)}"
 
     @classmethod
+    def get_effect(cls, variant: GenomicVariant) -> dict:
+        params = {**cls.BASE_PARAMS, **{
+        }}
+        variant_id = str(variant)
+        resp = requests.post(cls.BASE_URL, params=params, json={"ids": [variant_id]})
+        resp.raise_for_status()
+        annotation_data = resp.json()
+
+        if len(annotation_data) < 1 or annotation_data[0].get("notfound", False):
+            return {}
+        annotation_entry = annotation_data[0]
+
+        effects, = fetch_mapped(annotation_entry, Mapping(name="Effect", keys=[("cadd", "gene")], converter=lambda d: d))
+        return effects
+
+
+    @classmethod
     def query(cls, variant: GenomicVariant):
         params = {**cls.BASE_PARAMS, **{
         }}
@@ -399,7 +513,7 @@ class MyVariant(Scraper):
 
 
 VARIANT_SOURCES = [
-    CADD, MutationTaster2021, Franklin, GNOMAD, MyVariant
+    CADD, MutationTaster2021, Franklin, GNOMAD, MyVariant, Metadome
 ]
 
 NUM_PROCESSES = len(VARIANT_SOURCES)
@@ -417,4 +531,5 @@ def queryUrls(variant: GenomicVariant) -> Dict[str, str]:
 def queryVariant(variant: GenomicVariant) -> Dict[str, List[Prediction]]:
     with Pool(NUM_PROCESSES) as pool:
         predictions = dict(pool.starmap(__run, [(f, variant) for f in VARIANT_SOURCES]))
-        return predictions
+
+    return predictions
