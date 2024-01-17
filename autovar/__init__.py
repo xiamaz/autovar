@@ -1,6 +1,7 @@
 import re
 from typing import Any, Callable, List, Optional, Dict, Tuple
 import requests
+import time
 
 from pydantic import BaseModel
 import pandas as pd
@@ -107,6 +108,34 @@ class CADD(Scraper):
                 score_source=cls.name,
             )
         ]
+        return predictions
+
+
+class AlphaMissense(Scraper):
+    @classmethod
+    def url(cls, variant: GenomicVariant) -> str:
+        url = f"http://varcrawler.charite.de:8000/chr{variant.chr}-{variant.position}"
+        return url
+
+    @classmethod
+    def query(cls, variant: GenomicVariant):
+        url = f"http://varcrawler.charite.de:8000/chr{variant.chr}-{variant.position}"
+        resp = requests.get(url)
+        resp.raise_for_status()
+        result = resp.json()
+
+        predictions = []
+        for raw_pred in result:
+            if raw_pred["REF"] != variant.ref:
+                raise RuntimeError("REF mismatch")
+            if raw_pred["ALT"] == variant.alt:
+                predictions.append(Prediction(
+                    variant=variant,
+                    score_value=raw_pred["am_pathogenicity"],
+                    score_label=raw_pred["am_class"],
+                    score_name=f"{raw_pred['uniprot_id']}:{raw_pred['protein_variant']}",
+                    score_source=cls.name,
+                ))
         return predictions
 
 
@@ -386,7 +415,6 @@ class Metadome(Scraper):
         resp = requests.get(url)
         resp.raise_for_status()
         data = resp.json()
-        print(data)
 
         d = data.get("transcript_ids")
         if not d:
@@ -395,6 +423,20 @@ class Metadome(Scraper):
 
     @classmethod
     def get_transcript_predictions(cls, enst_id: str) -> dict:
+        submit_url = f"https://stuart.radboudumc.nl/metadome/api/submit_visualization/"
+        resp = requests.post(submit_url, json={"transcript_id": enst_id})
+        resp.raise_for_status()
+        assert resp.json()["transcript_id"] == enst_id
+
+        MAX_RETRIES = 5
+        for _ in range(MAX_RETRIES):
+            check_url = f"https://stuart.radboudumc.nl/metadome/api/status/{enst_id}"
+            resp = requests.get(check_url)
+            resp.raise_for_status()
+            if resp.json()["status"] == "SUCCESS":
+                break
+            time.sleep(5)
+
         url = f"https://stuart.radboudumc.nl/metadome/api/result/{enst_id}/"
         resp = requests.get(url)
         resp.raise_for_status()
@@ -513,7 +555,7 @@ class MyVariant(Scraper):
 
 
 VARIANT_SOURCES = [
-    CADD, MutationTaster2021, Franklin, GNOMAD, MyVariant, Metadome
+    MutationTaster2021, Franklin, GNOMAD, MyVariant, Metadome, AlphaMissense
 ]
 
 NUM_PROCESSES = len(VARIANT_SOURCES)

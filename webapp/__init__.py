@@ -61,6 +61,7 @@ PRETTY_KEYS = {
     "GNOMAD MAF": first_entry("MAF"),
     "GNOMAD HOM": first_entry("HOM"),
     "Metadome": first_entry(source="Metadome", show_label=True),
+    "AlphaMissense": highest_value_label(source="AlphaMissense"),
 }
 
 def format_entry(name, mapper, predictions):
