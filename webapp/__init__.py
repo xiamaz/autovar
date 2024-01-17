@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 def parse(variant_string: str) -> Optional[GenomicVariant]:
     variant_string = variant_string.replace(",", "")
-    if m := re.search(r"([YyXx\d]+)[ :\-_)]+(\d+)[ \-_:]*([ATCGatcg])[ >\-_:]([ATCGatcg])", variant_string):
+    if m := re.search(r"([YyXx\d]+)[ :\-_)]+(\d+)[ \-_:]*([ATCGatcg]+)[ >\-_:]([ATCGatcg]+)", variant_string):
         chrom = m.group(1)
         pos = int(m.group(2))
         ref = m.group(3)

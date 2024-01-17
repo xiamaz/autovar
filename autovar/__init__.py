@@ -21,6 +21,11 @@ class GenomicVariant(BaseModel):
     def __str__(self):
         return f"chr{self.chr}:g.{self.position}{self.ref}>{self.alt}"
 
+    @classmethod
+    def from_gnomad_id(cls, gnomad_id, assembly):
+        chrom, pos, ref, alt = gnomad_id.split("-")
+        return cls(assembly=assembly, chr=chrom, position=pos, ref=ref, alt=alt)
+
 
 class Prediction(BaseModel):
 
@@ -119,6 +124,8 @@ class AlphaMissense(Scraper):
 
     @classmethod
     def query(cls, variant: GenomicVariant):
+        if len(variant.ref) > 1 or len(variant.alt) > 1:
+            return []
         url = f"http://varcrawler.charite.de:8000/chr{variant.chr}-{variant.position}"
         resp = requests.get(url)
         resp.raise_for_status()
@@ -141,11 +148,43 @@ class AlphaMissense(Scraper):
 
 class GNOMAD(Scraper):
 
+    API_URL = "https://gnomad.broadinstitute.org/api/"
+
     @classmethod
     def url(cls, variant: GenomicVariant) -> str:
-        GNOMAD_VARIANT_URL = "https://gnomad.broadinstitute.org/variant/{chr}-{position}-{ref}-{alt}?dataset=gnomad_r2_1"
+        GNOMAD_VARIANT_URL = "https://gnomad.broadinstitute.org/variant/liftover/{chr}-{position}-{ref}-{alt}/gnomad_r2_1/gnomad_r4"
         url = GNOMAD_VARIANT_URL.format(chr=variant.chr, position=variant.position, ref=variant.ref, alt=variant.alt)
         return url
+
+    @classmethod
+    def liftover(cls, variant: GenomicVariant) -> List[GenomicVariant]:
+        """Lift variant into another reference.
+        """
+        json_data = {
+            "operationName": "LiftoverDisambiguation",
+            "query": """
+                query LiftoverDisambiguation($source_variant_id: String, $liftover_variant_id: String, $reference_genome: ReferenceGenomeId!) {
+                  liftover(source_variant_id: $source_variant_id, liftover_variant_id: $liftover_variant_id, reference_genome: $reference_genome) {
+                \tliftover {
+                \t  variant_id
+                \t}
+                    }
+                  }
+            """,
+            "variables": {
+                "reference_genome": variant.assembly,
+                "source_variant_id": f'{variant.chr}-{variant.position}-{variant.ref}-{variant.alt}',
+            }
+        }
+        response = requests.post(cls.API_URL, json=json_data, headers=HEADERS)
+        response.raise_for_status()
+        response_data = response.json()
+
+        liftovers = response_data["data"]["liftover"]
+        variants = [
+            GenomicVariant.from_gnomad_id(liftover["liftover"]["variant_id"], assembly="GRCh38") for liftover in liftovers
+        ]
+        return variants
 
     @classmethod
     def query(cls, variant: GenomicVariant):
@@ -234,6 +273,93 @@ class GNOMAD(Scraper):
             },
         }
 
+        liftovers = cls.liftover(variant)
+        json_data_v4 = {}
+        if liftovers:
+            liftover = liftovers[0]
+            json_data_v4 = {
+                'operationName': 'GnomadVariant',
+                'query':"""
+        query GnomadVariant($variantId: String!, $datasetId: DatasetId!, $includeLocalAncestry: Boolean!) {
+          variant(variantId: $variantId, dataset: $datasetId) {
+            variant_id
+            reference_genome
+            chrom
+            pos
+            ref
+            alt
+            caid
+            colocated_variants
+            coverage {
+              exome {
+                mean
+              }
+              genome {
+                mean
+              }
+            }
+            multi_nucleotide_variants {
+              combined_variant_id
+              changes_amino_acids
+              n_individuals
+              other_constituent_snvs
+            }
+            exome {
+              ac
+              an
+              ac_hemi
+              ac_hom
+              faf95 {
+                popmax
+                popmax_population
+              }
+              filters
+              populations {
+                id
+                ac
+                an
+                ac_hemi
+                ac_hom
+              }
+              local_ancestry_populations @include(if: $includeLocalAncestry) {
+                id
+                ac
+                an
+              }
+            }
+            genome {
+              ac
+              an
+              ac_hemi
+              ac_hom
+              faf95 {
+                popmax
+                popmax_population
+              }
+              filters
+              populations {
+                id
+                ac
+                an
+                ac_hemi
+                ac_hom
+              }
+              local_ancestry_populations @include(if: $includeLocalAncestry) {
+                id
+                ac
+                an
+              }
+            }
+          }
+        }
+        """,
+                'variables': {
+                    'datasetId': 'gnomad_r4',
+                    'includeLocalAncestry': False,
+                    'variantId': f'{liftover.chr}-{liftover.position}-{liftover.ref}-{liftover.alt}',
+                },
+            }
+
         response = requests.post(GNOMAD_URL, json=json_data, headers=HEADERS)
         response.raise_for_status()
         resp_data = response.json()
@@ -253,7 +379,10 @@ class GNOMAD(Scraper):
                 }} for p in exome_data["populations"] if "_" not in p["id"]  # type: ignore
             ]
 
-            popmax = max(subpopulations, key=lambda p: p["ac"] / p["an"])
+            if subpopulations:
+                popmax = max(subpopulations, key=lambda p: p["ac"] / p["an"])
+            else:
+                popmax = {}
 
             predictions.append(Prediction(
                 variant=variant,
@@ -269,13 +398,57 @@ class GNOMAD(Scraper):
                 score_name="HOM",
                 score_source=cls.name,
             ))
-            predictions.append(Prediction(
-                variant=variant,
-                score_value=f"{(popmax['ac'] / popmax['an']) * 100:.5f}%",
-                score_label=f"{popmax['id'].upper()}",
-                score_name="POPMAX AF",
-                score_source=cls.name,
-            ))
+            if popmax:
+                predictions.append(Prediction(
+                    variant=variant,
+                    score_value=f"{(popmax['ac'] / popmax['an']) * 100:.5f}%",
+                    score_label=f"{popmax['id'].upper()}",
+                    score_name="POPMAX AF",
+                    score_source=cls.name,
+                ))
+
+        if json_data_v4:
+            response = requests.post(GNOMAD_URL, json=json_data_v4, headers=HEADERS)
+            response.raise_for_status()
+            resp_data = response.json()
+            if variant_data := resp_data["data"]["variant"]:
+                exome_data = variant_data["exome"] or {"an": 0, "ac": 0, "ac_hom": 0, "ac_hemi": 0, "populations": []}
+                genome_data = variant_data["genome"] or {"an": 0, "ac": 0, "ac_hom": 0, "ac_hemi": 0, "populations": []}
+
+                total_an = exome_data["an"] + genome_data["an"]  # type: ignore
+                total_ac = exome_data["ac"] + genome_data["ac"]  # type: ignore
+                total_hom = exome_data["ac_hom"] + exome_data["ac_hemi"] + genome_data["ac_hom"] + genome_data["ac_hemi"]  # type: ignore
+
+                subpopulations = [
+                    { "id": p["id"] , **{
+                        key: sum(pp[key] for pp in exome_data["populations"] + genome_data["populations"] if pp["id"] == p["id"] and pp[key])  # type: ignore
+                        for key in ("ac", "an", "ac_hemi", "ac_hom")
+                    }} for p in exome_data["populations"] if "_" not in p["id"]  # type: ignore
+                ]
+
+                predictions.append(Prediction(
+                    variant=variant,
+                    score_value=f"{(total_ac / total_an) * 100:.5f}%",
+                    score_label="",
+                    score_name="MAF_V4",
+                    score_source=cls.name,
+                ))
+                predictions.append(Prediction(
+                    variant=variant,
+                    score_value=f"{total_hom}",
+                    score_label="",
+                    score_name="HOM_V4",
+                    score_source=cls.name,
+                ))
+                if subpopulations:
+                    popmax = max(subpopulations, key=lambda p: p["ac"] / p["an"])
+                    predictions.append(Prediction(
+                        variant=variant,
+                        score_value=f"{(popmax['ac'] / popmax['an']) * 100:.5f}%",
+                        score_label=f"{popmax['id'].upper()}",
+                        score_name="POPMAX AF_V4",
+                        score_source=cls.name,
+                    ))
 
         return predictions
 
@@ -293,18 +466,21 @@ class MutationTaster2021(Scraper):
         MT21_URL = "https://www.genecascade.org/MTc2021/ChrPos102.cgi"
         response = requests.get(MT21_URL, params={"chromosome": variant.chr, "position": variant.position, "ref": variant.ref, "alt": variant.alt}, headers=HEADERS)
         response.raise_for_status()
-        tables = pd.read_html(response.text)
-        predictions = [
-            Prediction(
-                variant=variant,
-                score_value=pred["Tree vote"],
-                score_label=pred["Prediction"],
-                score_name=f"{pred['Transcript']}_{pred['Model']}",
-                score_source=cls.name,
-            )
-            for pred in
-            tables[0].to_dict("records")
-        ]
+        try:
+            tables = pd.read_html(response.text)
+            predictions = [
+                Prediction(
+                    variant=variant,
+                    score_value=pred["Tree vote"],
+                    score_label=pred["Prediction"],
+                    score_name=f"{pred['Transcript']}_{pred['Model']}",
+                    score_source=cls.name,
+                )
+                for pred in
+                tables[0].to_dict("records")
+            ]
+        except ValueError:
+            return []
         return predictions
 
 
@@ -375,6 +551,8 @@ class Metadome(Scraper):
 
     @classmethod
     def query(cls, variant: GenomicVariant):
+        if len(variant.ref) > 1 or len(variant.alt) > 1:
+            return []
         effects = MyVariant.get_effect(variant)
         if not effects:
             return []
@@ -571,6 +749,7 @@ def queryUrls(variant: GenomicVariant) -> Dict[str, str]:
     }
 
 def queryVariant(variant: GenomicVariant) -> Dict[str, List[Prediction]]:
+    print(variant)
     with Pool(NUM_PROCESSES) as pool:
         predictions = dict(pool.starmap(__run, [(f, variant) for f in VARIANT_SOURCES]))
 
